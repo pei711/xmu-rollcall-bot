@@ -1,10 +1,45 @@
 #!/usr/bin/env python3
 """
-XMU Rollcall Auto Sign-in Script
-- 雷达签到：两探针点三角定位法
-- 数字签到：API 获取签到码后提交
-- 通知方式：方糖 Server酱 v3 (sctapi.ftqq.com) → 微信公众号
-- 运行方式：systemd 守护，崩溃自动重启（Restart=always, RestartSec=5）
+XMU Rollcall Auto Sign-in Bot
+=============================
+24/7 server-polling auto sign-in bot for Xiamen University TronClass
+platform (lnt.xmu.edu.cn).
+
+Features
+--------
+* Number roll-call : waits until >= 10 classmates have signed in, then
+  fetches the number code via API and submits. Non-stop waiting until
+  the threshold is met; gives up gracefully if the roll-call
+  disappears from the list (closed by teacher / expired).
+* Radar roll-call  : two-probe trilateration -- submits two probe
+  coordinates, reads the distances reported by the server, computes
+  the circle intersection, and answers with the solved position.
+* QR-code roll-call: cannot be automated; sends a ServerChan (WeChat)
+  reminder for manual scanning.
+* Notification     : all results pushed to WeChat via ServerChan v3
+  (sctapi.ftqq.com).
+* Multi-account    : one script copy per account; config and session
+  cache isolated via XMU_ROLLCALL_CONFIG_DIR.
+* Survivability    : designed for systemd (Restart=always); cached
+  sessions are reused and re-login happens automatically on expiry.
+
+Usage
+-----
+1. Prepare config.json in the config directory
+   (default /root/.xmu_rollcall, or set XMU_ROLLCALL_CONFIG_DIR):
+   {"username": "<student_id>", "password": "<password>",
+    "sendkey": "<ServerChan_SendKey>"}
+2. Run directly:  python3 xmu_signin.py
+   Or manage via systemd (see README.md).
+
+Acknowledgement
+---------------
+The core answering logic is based on / inspired by
+https://github.com/KrsMt-0113/XMU-Rollcall-Bot
+This deployment focuses on 24/7 server polling.
+
+Author : pei711 (ZHANG JUNPEI)
+Repo   : https://github.com/pei711/xmu-rollcall-bot
 """
 
 import os
