@@ -1,0 +1,5 @@
+config.json
+cookies.json
+*.log
+__pycache__/
+.lazybot/
