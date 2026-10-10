@@ -358,10 +358,17 @@ def answer_number_rollcall(session, rollcall):
     if not wait_for_classmates(session, rollcall_id, tag="数字签到: "):
         return False, "签到已关闭或过期，放弃签到"
 
-    # 获取签到码（旧接口 number_code 已被官方隐藏，直接走 timetable 接口）
-    number_code = fetch_number_code_timetable(session, rollcall_id, rollcall.get("course_id"))
+    # 获取签到码（timetable 接口；码生成有延迟，带重试兜底）
+    number_code = None
+    for attempt in range(12):
+        number_code = fetch_number_code_timetable(session, rollcall_id, rollcall.get("course_id"))
+        if number_code:
+            break
+        if attempt < 11:
+            log.warning(f"  timetable 接口暂无签到码(第{attempt+1}/12次)，15秒后重试...")
+            time.sleep(15)
     if not number_code:
-        log.error("  timetable 接口未返回 number_code")
+        log.error("  timetable 接口始终未返回 number_code")
         return False, "服务端未返回签到码(接口已被官方修复)，请手动签到"
 
     log.info(f"  签到码: {number_code}")
