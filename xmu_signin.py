@@ -337,7 +337,7 @@ def answer_number_rollcall(session, rollcall):
     number_code = find_number_code(resp.json())
     if not number_code:
         log.error("  响应中未找到 number_code")
-        return False, "未找到签到码"
+        return False, "服务端未返回签到码(接口已被官方修复)，请手动签到"
 
     log.info(f"  签到码: {number_code}")
     payload = {"deviceId": str(uuid.uuid4()), "numberCode": number_code}
@@ -617,6 +617,8 @@ def main_loop():
 
                 elif is_number:
                     if status == "absent":
+                        # 数字签到接口 number_code 已被服务端隐藏(2026-10起)，立即提醒手动签，同时保留自动尝试
+                        notify_signin(sendkey, course_title, teacher, '数字签到', False, '检测到数字签到！自动签可能失败(接口被修复)，请立即手动签App')
                         success, detail = answer_number_rollcall(session, rc)
                     elif status == "on_call_fine":
                         success = True
