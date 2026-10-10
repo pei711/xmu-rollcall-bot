@@ -667,7 +667,11 @@ def main_loop():
 
                 # 发送通知
                 notified_rollcalls.add(rc_id)
-                notify_signin(sendkey, course_title, teacher, rc_type, success, detail)
+                # 数字签到“取码失败”不再重复提醒(检测时已提醒手动签)，节省方糖每日额度
+                if is_number and not success and "请手动签到" in detail:
+                    log.info(f"    数字签到自动尝试失败(已提醒手动签)，跳过重复通知")
+                else:
+                    notify_signin(sendkey, course_title, teacher, rc_type, success, detail)
 
         except KeyboardInterrupt:
             raise
