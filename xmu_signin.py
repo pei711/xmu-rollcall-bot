@@ -326,24 +326,26 @@ def fetch_number_code_timetable(session, rollcall_id, course_id):
     except Exception:
         return None
 
+    # timetable 响应的条目 rollcall_id 恒为 null，不能按 rollcall_id 匹配；
+    # 查询已按 course_ids 限定单课程，直接收集有码条目，优先 in_progress
+    codes = []
+
     def walk(node):
         if isinstance(node, dict):
-            if str(node.get("rollcall_id", "")) == str(rollcall_id):
-                nc = node.get("number_code")
-                if nc is not None:
-                    return str(nc)
+            nc = node.get("number_code")
+            if nc is not None:
+                codes.append((str(node.get("status") or ""), str(nc)))
             for v in node.values():
-                got = walk(v)
-                if got:
-                    return got
+                walk(v)
         elif isinstance(node, list):
             for v in node:
-                got = walk(v)
-                if got:
-                    return got
-        return None
+                walk(v)
 
-    return walk(data)
+    walk(data)
+    for status, nc in codes:
+        if "progress" in status:
+            return nc
+    return codes[-1][1] if codes else None
 
 
 def answer_number_rollcall(session, rollcall):
