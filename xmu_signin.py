@@ -350,7 +350,6 @@ def answer_number_rollcall(session, rollcall):
     """处理数字签到 - 等待 N 个同学签到后再获取签到码并提交"""
     rollcall_id = rollcall["rollcall_id"]
     course_title = rollcall.get("course_title", "?")
-    code_url = f"{BASE_URL}/api/rollcall/{rollcall_id}/student_rollcalls"
     answer_url = f"{BASE_URL}/api/rollcall/{rollcall_id}/answer_number_rollcall"
 
     log.info(f"  数字签到: {course_title}")
@@ -359,23 +358,10 @@ def answer_number_rollcall(session, rollcall):
     if not wait_for_classmates(session, rollcall_id, tag="数字签到: "):
         return False, "签到已关闭或过期，放弃签到"
 
-    # 获取签到码
-    try:
-        resp = session.get(code_url, headers=HEADERS, timeout=15)
-    except Exception as e:
-        log.error(f"  获取签到码失败: {e}")
-        return False, f"网络错误: {e}"
-
-    if resp.status_code != 200:
-        log.error(f"  获取签到码 HTTP {resp.status_code}")
-        return False, f"获取签到码失败 HTTP {resp.status_code}"
-
-    number_code = find_number_code(resp.json())
+    # 获取签到码（旧接口 number_code 已被官方隐藏，直接走 timetable 接口）
+    number_code = fetch_number_code_timetable(session, rollcall_id, rollcall.get("course_id"))
     if not number_code:
-        log.warning("  旧接口无签到码，尝试 timetable_rollcalls 接口...")
-        number_code = fetch_number_code_timetable(session, rollcall_id, rollcall.get("course_id"))
-    if not number_code:
-        log.error("  响应中未找到 number_code")
+        log.error("  timetable 接口未返回 number_code")
         return False, "服务端未返回签到码(接口已被官方修复)，请手动签到"
 
     log.info(f"  签到码: {number_code}")
