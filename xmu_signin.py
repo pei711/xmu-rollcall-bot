@@ -310,6 +310,42 @@ def find_number_code(data, depth=0, max_depth=10):
     return None
 
 
+def fetch_number_code_timetable(session, rollcall_id, course_id):
+    """Fallback: /api/timetable_rollcalls still returns number_code
+    after the official fix hid it from /student_rollcalls."""
+    if course_id is None:
+        return None
+    try:
+        resp = session.get(f"{BASE_URL}/api/timetable_rollcalls",
+                           headers=HEADERS, timeout=15,
+                           params={"course_ids": str(course_id),
+                                   "rollcall_date": time.strftime("%Y-%m-%d")})
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except Exception:
+        return None
+
+    def walk(node):
+        if isinstance(node, dict):
+            if str(node.get("rollcall_id", "")) == str(rollcall_id):
+                nc = node.get("number_code")
+                if nc is not None:
+                    return str(nc)
+            for v in node.values():
+                got = walk(v)
+                if got:
+                    return got
+        elif isinstance(node, list):
+            for v in node:
+                got = walk(v)
+                if got:
+                    return got
+        return None
+
+    return walk(data)
+
+
 def answer_number_rollcall(session, rollcall):
     """处理数字签到 - 等待 N 个同学签到后再获取签到码并提交"""
     rollcall_id = rollcall["rollcall_id"]
@@ -335,6 +371,9 @@ def answer_number_rollcall(session, rollcall):
         return False, f"获取签到码失败 HTTP {resp.status_code}"
 
     number_code = find_number_code(resp.json())
+    if not number_code:
+        log.warning("  旧接口无签到码，尝试 timetable_rollcalls 接口...")
+        number_code = fetch_number_code_timetable(session, rollcall_id, rollcall.get("course_id"))
     if not number_code:
         log.error("  响应中未找到 number_code")
         return False, "服务端未返回签到码(接口已被官方修复)，请手动签到"
