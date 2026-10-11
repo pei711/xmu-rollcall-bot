@@ -348,7 +348,7 @@ def fetch_number_code_timetable(session, rollcall_id, course_id):
     return codes[-1][1] if codes else None
 
 
-def answer_number_rollcall(session, rollcall):
+def answer_number_rollcall(session, rollcall, sendkey=None, course_title=None, teacher=None):
     """处理数字签到 - 等待 N 个同学签到后再获取签到码并提交"""
     rollcall_id = rollcall["rollcall_id"]
     course_title = rollcall.get("course_title", "?")
@@ -362,10 +362,20 @@ def answer_number_rollcall(session, rollcall):
 
     # 获取签到码（timetable 接口；码生成有延迟，带重试兜底）
     number_code = None
+    fetch_started = time.time()
+    reminded_slow = False
     for attempt in range(12):
         number_code = fetch_number_code_timetable(session, rollcall_id, rollcall.get("course_id"))
         if number_code:
             break
+        # 超过60秒仍未签上 → 发一次提醒（每场只发一次）
+        if not reminded_slow and time.time() - fetch_started >= 60:
+            log.warning("  自动签到超过60秒未成功，发提醒通知")
+            if sendkey:
+                notify_signin(sendkey, course_title or rollcall.get("course_title", ""),
+                              rollcall.get("created_by_name", ""), "数字签到", False,
+                              "自动签到已尝试超过1分钟仍未成功，请手动打开畅课App签到")
+            reminded_slow = True
         if attempt < 11:
             log.warning(f"  timetable 接口暂无签到码(第{attempt+1}/12次)，15秒后重试...")
             time.sleep(15)
@@ -651,9 +661,7 @@ def main_loop():
 
                 elif is_number:
                     if status == "absent":
-                        # 数字签到接口 number_code 已被服务端隐藏(2026-10起)，立即提醒手动签，同时保留自动尝试
-                        notify_signin(sendkey, course_title, teacher, '数字签到', False, '检测到数字签到！自动签可能失败(接口被修复)，请立即手动签App')
-                        success, detail = answer_number_rollcall(session, rc)
+                        success, detail = answer_number_rollcall(session, rc, sendkey, course_title, teacher)
                     elif status == "on_call_fine":
                         success = True
                         detail = "已完成"
