@@ -177,7 +177,7 @@ def get_or_create_session(config):
             break
         log.error(f"XMU 登录失败！{backoff}秒后重试(认证系统可能临时故障)...")
         time.sleep(backoff)
-        backoff = min(backoff * 2, 600)
+        backoff = min(backoff * 2, 300)
 
     session.headers.update(HEADERS)
     save_session(session, cache_path)
