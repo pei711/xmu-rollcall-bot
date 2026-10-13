@@ -167,12 +167,17 @@ def get_or_create_session(config):
         else:
             log.warning("加载 session 缓存失败，重新登录...")
 
-    # 重新登录
-    log.info("正在登录 XMU 统一认证...")
-    session = xmulogin(type=3, username=config["username"], password=config["password"])
-    if not session:
-        log.error("XMU 登录失败！请检查学号和密码。")
-        sys.exit(1)
+    # 重新登录（失败指数退避：60s→120s→...→600s，避免认证系统故障时风暴式重试）
+    backoff = 60
+    session = None
+    while session is None:
+        log.info("正在登录 XMU 统一认证...")
+        session = xmulogin(type=3, username=config["username"], password=config["password"])
+        if session:
+            break
+        log.error(f"XMU 登录失败！{backoff}秒后重试(认证系统可能临时故障)...")
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 600)
 
     session.headers.update(HEADERS)
     save_session(session, cache_path)
