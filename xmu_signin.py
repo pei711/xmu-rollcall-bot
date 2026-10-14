@@ -62,7 +62,9 @@ def china_now():
 
 # ==================== 配置 ====================
 BASE_URL = "https://lnt.xmu.edu.cn"
-POLL_INTERVAL = 1  # 查询间隔（秒）
+# 自适应轮询节奏（借鉴 xmu_assistant）：空闲慢、活跃快，降低无谓请求量
+POLL_INTERVAL_IDLE = 30    # 空闲（无进行中签到）轮询间隔
+POLL_INTERVAL_ACTIVE = 5   # 活跃（有进行中签到）轮询间隔
 
 HEADERS = {
     "User-Agent": (
@@ -264,6 +266,26 @@ def _fetch_signed_count(session, rollcall_id):
     return None
 
 
+def _has_active_rollcall(rollcalls):
+    """有进行中的签到（未过期且截止时间未到）→ 快轮询。
+    判定借鉴 xmu_assistant：解析 end_time 剩余时间；解析失败时保守按活跃处理。"""
+    for rc in rollcalls:
+        if not isinstance(rc, dict) or rc.get("is_expired"):
+            continue
+        end = rc.get("end_time") or ""
+        if not end:
+            return True
+        try:
+            end_dt = datetime.fromisoformat(str(end).strip().replace("Z", "+00:00"))
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=dt_timezone.utc)
+            if end_dt > datetime.now(dt_timezone.utc):
+                return True
+        except (ValueError, TypeError):
+            return True
+    return False
+
+
 def wait_for_classmates(session, rollcall_id, tag=""):
     """等待至少 WAIT_CLASSMATES_COUNT 个同学签到（数字/雷达通用）。
     无限等待直到人数达标；若签到从列表消失(老师关闭/过期)则放弃等待返回 False，
@@ -315,42 +337,64 @@ def find_number_code(data, depth=0, max_depth=10):
     return None
 
 
-def fetch_number_code_timetable(session, rollcall_id, course_id):
-    """Fallback: /api/timetable_rollcalls still returns number_code
-    after the official fix hid it from /student_rollcalls."""
+def rollcall_code_dates(rollcall_time="", end_time=""):
+    """timetable 按 UTC 归档日期：优先用开始时间转 UTC 日期；
+    缺开始时间时用截止时间并回溯一天兜底；全缺则取 UTC今天+昨天。"""
+    for text, is_start in ((rollcall_time, True), (end_time, False)):
+        try:
+            parsed = datetime.fromisoformat(str(text).strip().replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=CHINA_TZ)
+        day = parsed.astimezone(dt_timezone.utc).date()
+        if is_start:
+            return [day.isoformat()]
+        return [day.isoformat(), (day - timedelta(days=1)).isoformat()]
+    day = datetime.now(dt_timezone.utc).date()
+    return [day.isoformat(), (day - timedelta(days=1)).isoformat()]
+
+
+def matching_timetable_code(payload, rollcall_id, course_id=""):
+    """从 timetable 响应精确取码：id 或 rollcall_id 字段精确匹配 + course_id 校验。"""
+    rows = payload.get("rollcalls", []) if isinstance(payload, dict) else []
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("rollcall_id") or row.get("id") or "") != str(rollcall_id):
+            continue
+        course = row.get("course") if isinstance(row.get("course"), dict) else {}
+        returned_course = str(row.get("course_id") or course.get("id") or "")
+        if course_id and returned_course and returned_course != str(course_id):
+            continue
+        if row.get("is_radar"):
+            continue
+        nc = row.get("number_code")
+        if nc is not None and str(nc).strip() not in ("", "null"):
+            return str(nc).strip()
+    return None
+
+
+def fetch_number_code_timetable(session, rollcall_id, course_id, rollcall_time="", end_time=""):
+    """timetable 接口取码：UTC 日期(双日期兜底) + id 精确匹配（借鉴 xmu_assistant）。"""
     if course_id is None:
         return None
-    try:
-        resp = session.get(f"{BASE_URL}/api/timetable_rollcalls",
-                           headers=HEADERS, timeout=15,
-                           params={"course_ids": str(course_id),
-                                   "rollcall_date": time.strftime("%Y-%m-%d")})
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-    except Exception:
-        return None
-
-    # timetable 响应的条目 rollcall_id 恒为 null，不能按 rollcall_id 匹配；
-    # 查询已按 course_ids 限定单课程，直接收集有码条目，优先 in_progress
-    codes = []
-
-    def walk(node):
-        if isinstance(node, dict):
-            nc = node.get("number_code")
-            if nc is not None:
-                codes.append((str(node.get("status") or ""), str(nc)))
-            for v in node.values():
-                walk(v)
-        elif isinstance(node, list):
-            for v in node:
-                walk(v)
-
-    walk(data)
-    for status, nc in codes:
-        if "progress" in status:
-            return nc
-    return codes[-1][1] if codes else None
+    for day in rollcall_code_dates(rollcall_time, end_time):
+        try:
+            resp = session.get(f"{BASE_URL}/api/timetable_rollcalls",
+                               headers=HEADERS, timeout=15,
+                               params={"course_ids": str(course_id),
+                                       "rollcall_date": day})
+            if resp.status_code != 200:
+                continue
+            code = matching_timetable_code(resp.json(), rollcall_id, course_id)
+            if code:
+                return code
+        except Exception:
+            continue
+    return None
 
 
 def answer_number_rollcall(session, rollcall, sendkey=None, course_title=None, teacher=None):
@@ -370,7 +414,9 @@ def answer_number_rollcall(session, rollcall, sendkey=None, course_title=None, t
     fetch_started = time.time()
     reminded_slow = False
     for attempt in range(12):
-        number_code = fetch_number_code_timetable(session, rollcall_id, rollcall.get("course_id"))
+        number_code = fetch_number_code_timetable(
+            session, rollcall_id, rollcall.get("course_id"),
+            rollcall.get("rollcall_time", ""), rollcall.get("end_time", ""))
         if number_code:
             break
         # 超过60秒仍未签上 → 发一次提醒（每场只发一次）
@@ -570,12 +616,14 @@ def main_loop():
     prev_data = {"rollcalls": []}
     query_count = 0
     start_time = time.time()
+    # 自适应轮询：默认空闲档，检出进行中签到后切活跃档
+    poll_interval = POLL_INTERVAL_IDLE
 
     log.info("开始监控签到...")
 
     while True:
         try:
-            time.sleep(POLL_INTERVAL)
+            time.sleep(poll_interval)
         except KeyboardInterrupt:
             log.info("收到中断信号，优雅退出...")
             send_ftqq_notification(sendkey, "🛑 XMU签到服务已停止",
@@ -598,11 +646,18 @@ def main_loop():
             data = resp.json()
             query_count += 1
 
-            # 每60次查询输出一个心跳
-            if query_count % 60 == 0:
+            # 自适应轮询节奏（借鉴 xmu_assistant）：有进行中签到 → 活跃档快轮询，
+            # 空闲 → 慢轮询，日均请求量大幅下降，降低被风控风险
+            rollcalls_now = data.get("rollcalls", [])
+            poll_interval = (POLL_INTERVAL_ACTIVE
+                             if _has_active_rollcall(rollcalls_now)
+                             else POLL_INTERVAL_IDLE)
+
+            # 每10次查询输出一个心跳
+            if query_count % 10 == 0:
                 elapsed = int(time.time() - start_time)
                 log.info(f"心跳: {query_count}次查询, 运行{elapsed}s, "
-                        f"当前{len(data.get('rollcalls', []))}个签到")
+                        f"当前{len(rollcalls_now)}个签到, 轮询间隔{poll_interval}s")
 
             # 检查是否有新签到
             if data == prev_data:
