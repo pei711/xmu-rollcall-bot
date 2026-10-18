@@ -66,6 +66,10 @@ BASE_URL = "https://lnt.xmu.edu.cn"
 POLL_INTERVAL_IDLE = 30    # 空闲（无进行中签到）轮询间隔
 POLL_INTERVAL_ACTIVE = 5   # 活跃（有进行中签到）轮询间隔
 
+# 雷达签到默认提交坐标（厦大翔安）；可在 config.json 用 radar_lat/radar_lon 覆盖
+DEFAULT_RADAR_LAT = 24.605502
+DEFAULT_RADAR_LON = 118.313384
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -451,56 +455,7 @@ def answer_number_rollcall(session, rollcall, sendkey=None, course_title=None, t
         return False, f"提交失败 HTTP {resp.status_code}"
 
 
-# ==================== 雷达签到（三角定位） ====================
-def _latlon_to_xy(lat, lon, lat0, lon0):
-    radius = 6371000
-    x = math.radians(lon - lon0) * radius * math.cos(math.radians(lat0))
-    y = math.radians(lat - lat0) * radius
-    return x, y
-
-
-def _xy_to_latlon(x, y, lat0, lon0):
-    radius = 6371000
-    lat = lat0 + math.degrees(y / radius)
-    lon = lon0 + math.degrees(x / (radius * math.cos(math.radians(lat0))))
-    return lat, lon
-
-
-def _circle_intersections(x1, y1, d1, x2, y2, d2):
-    dist = math.hypot(x2 - x1, y2 - y1)
-    if dist == 0:
-        return None
-    if dist > d1 + d2 or dist < abs(d1 - d2):
-        return None
-
-    a = (d1**2 - d2**2 + dist**2) / (2 * dist)
-    h_sq = d1**2 - a**2
-    if h_sq < 0:
-        return None
-    h = math.sqrt(h_sq)
-
-    xm = x1 + a * (x2 - x1) / dist
-    ym = y1 + a * (y2 - y1) / dist
-
-    rx = -(y2 - y1) * (h / dist)
-    ry = (x2 - x1) * (h / dist)
-
-    return [(xm + rx, ym + ry), (xm - rx, ym - ry)]
-
-
-def _solve_trilateration(lat1, lon1, dist1, lat2, lon2, dist2):
-    lat0 = (lat1 + lat2) / 2
-    lon0 = (lon1 + lon2) / 2
-    x1, y1 = _latlon_to_xy(lat1, lon1, lat0, lon0)
-    x2, y2 = _latlon_to_xy(lat2, lon2, lat0, lon0)
-
-    intersections = _circle_intersections(x1, y1, dist1, x2, y2, dist2)
-    if not intersections:
-        return None
-
-    return [_xy_to_latlon(x, y, lat0, lon0) for x, y in intersections]
-
-
+# ==================== 雷达签到（直接提交当前经纬度） ====================
 def _build_radar_payload(lat, lon):
     return {
         "accuracy": 35,
@@ -514,79 +469,37 @@ def _build_radar_payload(lat, lon):
     }
 
 
-def answer_radar_rollcall(session, rollcall):
-    """处理雷达签到 - 两探针点三角定位法"""
+def answer_radar_rollcall(session, rollcall, lat=None, lon=None):
+    """处理雷达签到 - 直接提交当前经纬度（配置 radar_lat/radar_lon 可覆盖默认坐标）"""
     rollcall_id = rollcall["rollcall_id"]
     url = f"{BASE_URL}/api/rollcall/{rollcall_id}/answer"
+    try:
+        lat = DEFAULT_RADAR_LAT if lat is None else float(lat)
+        lon = DEFAULT_RADAR_LON if lon is None else float(lon)
+    except (TypeError, ValueError):
+        lat, lon = DEFAULT_RADAR_LAT, DEFAULT_RADAR_LON
 
-    log.info(f"  雷达签到: {rollcall.get('course_title', '?')}")
+    log.info(f"  雷达签到: {rollcall.get('course_title', '?')} "
+             f"(提交坐标 {lat:.6f}, {lon:.6f})")
 
     # ---- 等待至少 WAIT_CLASSMATES_COUNT 个同学签到 ----
     if not wait_for_classmates(session, rollcall_id, tag="雷达签到: "):
         return False, "签到已关闭或过期，放弃签到"
 
-    # 两个探针点（厦门大学附近）
-    probe_points = [
-        (24.3, 118.0),
-        (24.6, 118.2),
-    ]
+    try:
+        resp = session.put(url, json=_build_radar_payload(lat, lon),
+                           headers=HEADERS, timeout=15)
+    except Exception as e:
+        log.error(f"  雷达签到请求失败: {e}")
+        return False, f"网络错误: {e}"
 
-    # 第一轮：探针点探测
-    probe_results = []
-    for lat, lon in probe_points:
-        try:
-            resp = session.put(url, json=_build_radar_payload(lat, lon),
-                             headers=HEADERS, timeout=15)
-        except Exception as e:
-            log.error(f"  探针请求失败: {e}")
-            return False, f"网络错误: {e}"
+    if resp.status_code == 200:
+        log.info(f"  雷达签到成功! 坐标 {lat:.6f}, {lon:.6f}")
+        return True, f"坐标: {lat:.6f}, {lon:.6f}"
 
-        payload = resp.json() if resp.text else {}
-        probe_results.append((lat, lon, resp.status_code, payload))
-
-        if resp.status_code == 200:
-            log.info(f"  雷达签到成功! (探针点直接命中 lat={lat}, lon={lon})")
-            return True, f"位置: {lat:.5f}, {lon:.5f}"
-
-    # 解析距离
-    def parse_float(v):
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-
-    d1 = parse_float(probe_results[0][3].get("distance"))
-    d2 = parse_float(probe_results[1][3].get("distance"))
-
-    if d1 is None or d2 is None:
-        log.error("  服务端未返回距离信息")
-        return False, "雷达签到失败，无距离数据"
-
-    log.info(f"  探针1距离={d1:.1f}m, 探针2距离={d2:.1f}m")
-
-    # 三角定位求解
-    solved = _solve_trilateration(
-        probe_results[0][0], probe_results[0][1], d1,
-        probe_results[1][0], probe_results[1][1], d2,
-    )
-    if not solved:
-        log.error("  无法求解坐标")
-        return False, "无法求解坐标"
-
-    # 用求解出的坐标尝试
-    for lat, lon in solved:
-        try:
-            resp = session.put(url, json=_build_radar_payload(lat, lon),
-                             headers=HEADERS, timeout=15)
-        except Exception as e:
-            continue
-
-        if resp.status_code == 200:
-            log.info(f"  雷达签到成功! (求解坐标 lat={lat:.5f}, lon={lon:.5f})")
-            return True, f"求解位置: {lat:.5f}, {lon:.5f}"
-
-    log.error(f"  所有求解点均失败，HTTP {probe_results[-1][2]}")
-    return False, f"所有求解点均失败"
+    body = resp.text[:200] if resp.text else ""
+    log.error(f"  雷达签到失败 HTTP {resp.status_code}: {body}")
+    return False, f"雷达签到失败 HTTP {resp.status_code}"
 
 
 # ==================== 主循环 ====================
@@ -717,7 +630,8 @@ def main_loop():
                         success = True
                         detail = "已完成"
                     else:
-                        success, detail = answer_radar_rollcall(session, rc)
+                        success, detail = answer_radar_rollcall(
+                            session, rc, config.get("radar_lat"), config.get("radar_lon"))
 
                 elif is_number:
                     if status == "absent":
