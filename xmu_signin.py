@@ -66,9 +66,13 @@ BASE_URL = "https://lnt.xmu.edu.cn"
 POLL_INTERVAL_IDLE = 30    # 空闲（无进行中签到）轮询间隔
 POLL_INTERVAL_ACTIVE = 5   # 活跃（有进行中签到）轮询间隔
 
-# 雷达签到默认提交坐标（厦大翔安）；可在 config.json 用 radar_lat/radar_lon 覆盖
-DEFAULT_RADAR_LAT = 24.605502
-DEFAULT_RADAR_LON = 118.313384
+# 雷达签到默认坐标列表（账号1：主坐标 + 备用坐标），按顺序尝试；
+# 可在各账号 config.json 用 radar_points: [[lat,lon],...] 覆盖
+DEFAULT_RADAR_POINTS = [
+    (24.605502, 118.313384),   # 主坐标
+    (24.604938, 118.313703),   # 备用坐标
+]
+MAX_RADAR_ATTEMPTS = 2          # 最多提交次数；失败两次即停止
 
 HEADERS = {
     "User-Agent": (
@@ -469,37 +473,58 @@ def _build_radar_payload(lat, lon):
     }
 
 
-def answer_radar_rollcall(session, rollcall, lat=None, lon=None):
-    """处理雷达签到 - 直接提交当前经纬度（配置 radar_lat/radar_lon 可覆盖默认坐标）"""
+def _resolve_radar_points(config):
+    """解析配置中的雷达坐标：优先 radar_points 列表，其次 radar_lat/radar_lon，最后默认列表。"""
+    points = config.get("radar_points")
+    if isinstance(points, list) and points:
+        parsed = []
+        for p in points:
+            try:
+                parsed.append((float(p[0]), float(p[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        if parsed:
+            return parsed
+    lat, lon = config.get("radar_lat"), config.get("radar_lon")
+    try:
+        if lat is not None and lon is not None:
+            return [(float(lat), float(lon))]
+    except (TypeError, ValueError):
+        pass
+    return DEFAULT_RADAR_POINTS
+
+
+def answer_radar_rollcall(session, rollcall, points=None):
+    """处理雷达签到 - 直接提交经纬度；按坐标列表顺序尝试，最多 MAX_RADAR_ATTEMPTS 次。"""
     rollcall_id = rollcall["rollcall_id"]
     url = f"{BASE_URL}/api/rollcall/{rollcall_id}/answer"
-    try:
-        lat = DEFAULT_RADAR_LAT if lat is None else float(lat)
-        lon = DEFAULT_RADAR_LON if lon is None else float(lon)
-    except (TypeError, ValueError):
-        lat, lon = DEFAULT_RADAR_LAT, DEFAULT_RADAR_LON
+    if not points:
+        points = DEFAULT_RADAR_POINTS
+    attempts = list(points)[:MAX_RADAR_ATTEMPTS]
 
     log.info(f"  雷达签到: {rollcall.get('course_title', '?')} "
-             f"(提交坐标 {lat:.6f}, {lon:.6f})")
+             f"(共{len(attempts)}个候选坐标，最多尝试{MAX_RADAR_ATTEMPTS}次)")
 
     # ---- 等待至少 WAIT_CLASSMATES_COUNT 个同学签到 ----
     if not wait_for_classmates(session, rollcall_id, tag="雷达签到: "):
         return False, "签到已关闭或过期，放弃签到"
 
-    try:
-        resp = session.put(url, json=_build_radar_payload(lat, lon),
-                           headers=HEADERS, timeout=15)
-    except Exception as e:
-        log.error(f"  雷达签到请求失败: {e}")
-        return False, f"网络错误: {e}"
+    for idx, (lat, lon) in enumerate(attempts, 1):
+        log.info(f"  雷达签到尝试 {idx}/{len(attempts)}: 坐标 {lat:.6f}, {lon:.6f}")
+        try:
+            resp = session.put(url, json=_build_radar_payload(lat, lon),
+                               headers=HEADERS, timeout=15)
+        except Exception as e:
+            log.error(f"  雷达签到请求失败: {e}")
+            continue
+        if resp.status_code == 200:
+            log.info(f"  雷达签到成功! 坐标 {lat:.6f}, {lon:.6f}")
+            return True, f"坐标: {lat:.6f}, {lon:.6f}"
+        body = resp.text[:150] if resp.text else ""
+        log.warning(f"  坐标({lat:.6f},{lon:.6f})失败 HTTP {resp.status_code}: {body}")
 
-    if resp.status_code == 200:
-        log.info(f"  雷达签到成功! 坐标 {lat:.6f}, {lon:.6f}")
-        return True, f"坐标: {lat:.6f}, {lon:.6f}"
-
-    body = resp.text[:200] if resp.text else ""
-    log.error(f"  雷达签到失败 HTTP {resp.status_code}: {body}")
-    return False, f"雷达签到失败 HTTP {resp.status_code}"
+    log.error(f"  雷达签到 {len(attempts)} 次尝试均失败，停止")
+    return False, f"雷达签到失败（已尝试{len(attempts)}次）"
 
 
 # ==================== 主循环 ====================
@@ -510,6 +535,7 @@ def main_loop():
 
     config = load_config()
     sendkey = config.get("sendkey", "")
+    radar_points = _resolve_radar_points(config)
 
     if sendkey:
         log.info(f"方糖 sendkey 已配置: {sendkey[:10]}...")
@@ -631,7 +657,7 @@ def main_loop():
                         detail = "已完成"
                     else:
                         success, detail = answer_radar_rollcall(
-                            session, rc, config.get("radar_lat"), config.get("radar_lon"))
+                            session, rc, radar_points)
 
                 elif is_number:
                     if status == "absent":
